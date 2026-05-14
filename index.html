@@ -877,7 +877,7 @@
   <div class="notice">
     <i class="fas fa-microchip notice-icon"></i>
     <div class="notice-text">
-      <strong>MOTOR: FFmpeg.wasm</strong> — Esta app procesa video directamente en tu navegador usando WebAssembly. No se sube nada a servidores. <strong>Primera carga:</strong> descargará FFmpeg (~30MB). El procesamiento depende de tu CPU. Para archivos grandes se recomienda usar FFmpeg Desktop.
+      <strong>MOTOR: FFmpeg.wasm v0.12</strong> — Procesa video 100% en tu navegador. Sin subir archivos. <strong>Primera vez:</strong> descarga ~31MB de FFmpeg (solo una vez). Requiere Chrome/Edge/Firefox moderno. Para archivos muy grandes (&gt;2GB) usa FFmpeg desktop.
     </div>
   </div>
 
@@ -1225,7 +1225,13 @@
   </footer>
 </div>
 
-<script>
+<script type="module">
+// ========================
+// IMPORTS — FFmpeg 0.12 ESM (no SharedArrayBuffer needed)
+// ========================
+import { FFmpeg } from 'https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js';
+import { fetchFile, toBlobURL } from 'https://unpkg.com/@ffmpeg/util@0.12.1/dist/esm/index.js';
+
 // ========================
 // STATE
 // ========================
@@ -1234,23 +1240,19 @@ const state = {
   p: { file: null, ffmpeg: null, loaded: false }
 };
 
+// Expose globals needed by inline onclick handlers
+window._appState = state;
+
 // ========================
 // TABS
 // ========================
 function switchTab(tab) {
   document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-  document.getElementById('panel-' + (tab === 'c' ? 'converter' : 'compressor')).classList.add('active');
-  document.querySelector('.tab-btn.' + (tab === 'c' ? 'converter' : 'compressor')).classList.add('active');
+  document.getElementById('panel-' + tab).classList.add('active');
+  document.querySelector('.tab-btn.' + tab).classList.add('active');
 }
-
-// Handle tab buttons
-document.querySelectorAll('.tab-btn').forEach(btn => {
-  btn.addEventListener('click', function() {
-    const isConverter = this.classList.contains('converter');
-    switchTab(isConverter ? 'c' : 'p');
-  });
-});
+window.switchTab = switchTab;
 
 // ========================
 // FILE HANDLING
@@ -1271,6 +1273,10 @@ function handleDrop(e, id) {
 function handleFileSelect(e, id) {
   if (e.target.files.length > 0) setFile(e.target.files[0], id);
 }
+window.handleDragOver = handleDragOver;
+window.handleDragLeave = handleDragLeave;
+window.handleDrop = handleDrop;
+window.handleFileSelect = handleFileSelect;
 
 function setFile(file, id) {
   state[id].file = file;
@@ -1295,6 +1301,7 @@ function clearFile(id) {
   document.getElementById('file-input-' + id).value = '';
   document.getElementById(id === 'c' ? 'btn-convert' : 'btn-compress').disabled = true;
 }
+window.clearFile = clearFile;
 
 // ========================
 // CRF LABELS
@@ -1312,9 +1319,9 @@ function updateCRF(id) {
   else desc = 'Baja calidad, máxima compresión';
 
   document.getElementById('crf-desc-' + id).textContent = desc;
-
   if (id === 'p') updateSpecs();
 }
+window.updateCRF = updateCRF;
 
 // ========================
 // PRESETS
@@ -1337,13 +1344,13 @@ function applyPreset(id, key) {
   document.getElementById('crf-' + id).value = id === 'c' ? p.crf_c : p.crf_p;
   updateCRF(id);
 
-  // Update active badge
-  document.querySelectorAll('#presets-' + id + ' .preset-badge').forEach((b, i) => {
+  document.querySelectorAll('#presets-' + id + ' .preset-badge').forEach((b) => {
     b.classList.toggle('active', b.getAttribute('onclick').includes(key));
   });
 
   if (id === 'p') updateSpecs();
 }
+window.applyPreset = applyPreset;
 
 // ========================
 // COMPRESSOR PROFILE
@@ -1363,6 +1370,7 @@ function applyCompProfile() {
   document.getElementById('crf-desc-p').textContent = p.desc;
   updateSpecs();
 }
+window.applyCompProfile = applyCompProfile;
 
 function updateSpecs() {
   const crf = parseInt(document.getElementById('crf-p').value);
@@ -1385,252 +1393,65 @@ function updateSpecs() {
   document.getElementById('spec-crf').textContent = crf + (crf === 0 ? ' (lossless)' : '');
   document.getElementById('spec-reduction').textContent = reduction;
 }
+window.updateSpecs = updateSpecs;
 
 // ========================
-// FFMPEG PROCESSING
+// FFMPEG v0.12 PROCESSING
 // ========================
+const BASE_URL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm';
+
+async function getFFmpeg(id) {
+  if (state[id].ffmpeg && state[id].loaded) return state[id].ffmpeg;
+
+  const ff = new FFmpeg();
+
+  ff.on('log', ({ message }) => {
+    const logEl = document.getElementById('log-' + id);
+    if (!logEl) return;
+    // Filter only useful lines
+    if (message.includes('frame=') || message.includes('time=') || message.includes('speed=') || message.includes('Error') || message.includes('error')) {
+      const line = document.createElement('div');
+      line.className = 'log-line' + (message.toLowerCase().includes('error') ? ' pink' : '');
+      line.textContent = '> ' + message.substring(0, 120);
+      logEl.appendChild(line);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+  });
+
+  ff.on('progress', ({ progress }) => {
+    if (progress >= 0) {
+      const pct = 15 + Math.min(progress * 80, 80);
+      document.getElementById('bar-' + id).style.width = pct + '%';
+      document.getElementById('pct-' + id).textContent = Math.round(pct) + '%';
+      document.getElementById('status-' + id).innerHTML = `<span>Procesando... ${Math.round(progress * 100)}%</span>`;
+    }
+  });
+
+  await ff.load({
+    coreURL: await toBlobURL(`${BASE_URL}/ffmpeg-core.js`, 'text/javascript'),
+    wasmURL: await toBlobURL(`${BASE_URL}/ffmpeg-core.wasm`, 'application/wasm'),
+  });
+
+  state[id].ffmpeg = ff;
+  state[id].loaded = true;
+  return ff;
+}
+
 async function processVideo(id) {
   if (!state[id].file) return;
 
   const isCompressor = id === 'p';
   const progressEl = document.getElementById('progress-' + id);
-  const resultEl = document.getElementById('result-' + id);
-  const barEl = document.getElementById('bar-' + id);
-  const pctEl = document.getElementById('pct-' + id);
-  const statusEl = document.getElementById('status-' + id);
-  const logEl = document.getElementById('log-' + id);
+  const resultEl   = document.getElementById('result-' + id);
+  const barEl      = document.getElementById('bar-' + id);
+  const pctEl      = document.getElementById('pct-' + id);
+  const statusEl   = document.getElementById('status-' + id);
+  const logEl      = document.getElementById('log-' + id);
+  const btn        = document.getElementById(isCompressor ? 'btn-compress' : 'btn-convert');
 
   progressEl.classList.add('visible');
   resultEl.classList.remove('visible');
   logEl.innerHTML = '';
-
-  const btn = document.getElementById(isCompressor ? 'btn-compress' : 'btn-convert');
-  btn.disabled = true;
-
-  function addLog(msg, cls = '') {
-    const line = document.createElement('div');
-    line.className = 'log-line ' + cls;
-    line.textContent = '> ' + msg;
-    logEl.appendChild(line);
-    logEl.scrollTop = logEl.scrollHeight;
-  }
-
-  function setProgress(pct, status) {
-    barEl.style.width = pct + '%';
-    pctEl.textContent = Math.round(pct) + '%';
-    if (status) statusEl.innerHTML = '<span>' + status + '</span>';
-  }
-
-  try {
-    addLog('Cargando motor FFmpeg.wasm...', 'cyan');
-    setProgress(5, 'Descargando FFmpeg...');
-
-    // Load FFmpeg
-    const { createFFmpeg, fetchFile } = FFmpeg;
-    const ffmpeg = createFFmpeg({
-      log: true,
-      progress: ({ ratio }) => {
-        const pct = 10 + (ratio * 85);
-        setProgress(pct, `Procesando... ${Math.round(ratio * 100)}%`);
-      }
-    });
-
-    addLog('Iniciando motor WebAssembly...', 'cyan');
-    await ffmpeg.load();
-    addLog('FFmpeg cargado correctamente ✓', 'green');
-
-    // Write input file
-    const inputName = 'input_' + state[id].file.name.replace(/[^a-z0-9.]/gi, '_');
-    addLog(`Leyendo archivo: ${state[id].file.name}`, 'cyan');
-    setProgress(10, 'Leyendo archivo...');
-    ffmpeg.FS('writeFile', inputName, await fetchFile(state[id].file));
-
-    // Build FFmpeg command
-    const args = buildFFmpegArgs(id, inputName);
-    const outputName = args.outputName;
-    const cmd = args.args;
-
-    addLog(`Comando: ffmpeg ${cmd.join(' ')}`, '');
-    addLog('Iniciando procesamiento...', 'orange');
-    setProgress(15, 'Procesando video...');
-
-    await ffmpeg.run(...cmd);
-
-    addLog('Procesamiento completado ✓', 'green');
-    setProgress(98, 'Finalizando...');
-
-    // Read output
-    const data = ffmpeg.FS('readFile', outputName);
-    const ext = outputName.split('.').pop();
-    const mimeMap = { mp4: 'video/mp4', webm: 'video/webm', mkv: 'video/x-matroska', avi: 'video/x-msvideo', mov: 'video/quicktime' };
-    const mime = mimeMap[ext] || 'video/mp4';
-    const blob = new Blob([data.buffer], { type: mime });
-    const url = URL.createObjectURL(blob);
-
-    const origSize = state[id].file.size;
-    const finalSize = blob.size;
-
-    // Show result
-    document.getElementById('orig-size-' + id).textContent = formatSize(origSize);
-    document.getElementById('final-size-' + id).textContent = formatSize(finalSize);
-
-    if (isCompressor) {
-      const reduction = ((1 - finalSize / origSize) * 100).toFixed(1);
-      document.getElementById('reduction-p').textContent = reduction + '% menos';
-    }
-
-    const downloadEl = document.getElementById('download-' + id);
-    downloadEl.href = url;
-    const outFilename = isCompressor ? 'compressed_' : 'converted_';
-    downloadEl.download = outFilename + state[id].file.name.replace(/\.[^.]+$/, '') + '.' + ext;
-
-    setProgress(100, 'Completado');
-    addLog(`Listo → ${formatSize(finalSize)}`, 'green');
-    resultEl.classList.add('visible');
-
-    // Cleanup
-    ffmpeg.FS('unlink', inputName);
-    ffmpeg.FS('unlink', outputName);
-
-  } catch (err) {
-    addLog('ERROR: ' + err.message, 'pink');
-    setProgress(0, 'Error en el procesamiento');
-    console.error(err);
-  } finally {
-    btn.disabled = false;
-  }
-}
-
-function buildFFmpegArgs(id, inputName) {
-  const isCompressor = id === 'p';
-
-  const resSelect = document.getElementById('resolution-' + id).value;
-  const fpsSelect = document.getElementById('fps-' + id).value;
-  const crf = document.getElementById('crf-' + id).value;
-
-  let formatSelect;
-  if (isCompressor) {
-    formatSelect = document.getElementById('format-p').value;
-  } else {
-    formatSelect = document.getElementById('format-c').value;
-  }
-
-  // Determine output format
-  let ext = 'mp4';
-  let vcodec = 'libx264';
-  let acodec = 'aac';
-
-  if (formatSelect === 'same' || formatSelect === 'mp4') { ext = 'mp4'; vcodec = 'libx264'; }
-  else if (formatSelect === 'mp4_h265') { ext = 'mp4'; vcodec = 'libx265'; }
-  else if (formatSelect === 'webm') { ext = 'webm'; vcodec = 'libvpx-vp9'; acodec = 'libvorbis'; }
-  else if (formatSelect === 'mkv') { ext = 'mkv'; vcodec = 'libx264'; }
-  else if (formatSelect === 'avi') { ext = 'avi'; vcodec = 'libx264'; acodec = 'mp3'; }
-  else if (formatSelect === 'mov') { ext = 'mov'; vcodec = 'libx264'; }
-
-  if (!isCompressor) {
-    const audioSel = document.getElementById('audio-c').value;
-    if (audioSel === 'mp3') acodec = 'libmp3lame';
-    else if (audioSel === 'copy') acodec = 'copy';
-    else if (audioSel === 'none') acodec = null;
-  }
-
-  const outputName = 'output.' + ext;
-  const args = ['-i', inputName];
-
-  // Video codec
-  args.push('-c:v', vcodec);
-
-  // CRF
-  if (crf > 0 || vcodec !== 'libx264') {
-    args.push('-crf', crf);
-  }
-
-  // Preset for x264/x265
-  if (vcodec === 'libx264' || vcodec === 'libx265') {
-    const preset = isCompressor ? 'slow' : 'medium';
-    args.push('-preset', preset);
-  }
-
-  // Resolution
-  if (resSelect !== 'same') {
-    const resMap = { '4k':'3840:2160', '1440p':'2560:1440', '1080p':'1920:1080', '720p':'1280:720', '480p':'854:480' };
-    args.push('-vf', `scale=${resMap[resSelect]}:force_original_aspect_ratio=decrease,pad=${resMap[resSelect]}:(ow-iw)/2:(oh-ih)/2`);
-  }
-
-  // FPS
-  if (fpsSelect !== 'same') {
-    args.push('-r', fpsSelect);
-  }
-
-  // Audio
-  if (acodec === null) {
-    args.push('-an');
-  } else {
-    args.push('-c:a', acodec);
-    if (acodec === 'aac') args.push('-b:a', '192k');
-    if (acodec === 'libmp3lame') args.push('-b:a', '192k');
-  }
-
-  args.push('-movflags', '+faststart');
-  args.push(outputName);
-
-  return { args, outputName };
-}
-
-function formatSize(bytes) {
-  if (bytes < 1024) return bytes + ' B';
-  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-  if (bytes < 1024 * 1024 * 1024) return (bytes / 1024 / 1024).toFixed(2) + ' MB';
-  return (bytes / 1024 / 1024 / 1024).toFixed(2) + ' GB';
-}
-
-// ========================
-// FFMPEG.WASM CDN LOAD
-// ========================
-function loadFFmpegScript() {
-  return new Promise((resolve, reject) => {
-    if (window.FFmpeg) { resolve(); return; }
-    const script = document.createElement('script');
-    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/ffmpeg/0.11.6/ffmpeg.min.js';
-    script.onload = resolve;
-    script.onerror = reject;
-    document.head.appendChild(script);
-  });
-}
-
-// Override processVideo to ensure FFmpeg is loaded first
-const _origProcess = window.processVideo;
-window.processVideo = async function(id) {
-  try {
-    await loadFFmpegScript();
-  } catch(e) {
-    // Try alternate CDN
-    await new Promise((resolve, reject) => {
-      const s = document.createElement('script');
-      s.src = 'https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js';
-      s.onload = resolve;
-      s.onerror = reject;
-      document.head.appendChild(s);
-    });
-  }
-  await processVideo_real(id);
-};
-
-async function processVideo_real(id) {
-  if (!state[id].file) return;
-  const isCompressor = id === 'p';
-  const progressEl = document.getElementById('progress-' + id);
-  const resultEl = document.getElementById('result-' + id);
-  const barEl = document.getElementById('bar-' + id);
-  const pctEl = document.getElementById('pct-' + id);
-  const statusEl = document.getElementById('status-' + id);
-  const logEl = document.getElementById('log-' + id);
-
-  progressEl.classList.add('visible');
-  resultEl.classList.remove('visible');
-  logEl.innerHTML = '';
-
-  const btn = document.getElementById(isCompressor ? 'btn-compress' : 'btn-convert');
   btn.disabled = true;
 
   const addLog = (msg, cls = '') => {
@@ -1648,90 +1469,138 @@ async function processVideo_real(id) {
   };
 
   try {
-    addLog('Iniciando Video Michi App... 🐱', 'cyan');
+    addLog('Iniciando Video Michi App 🐱', 'cyan');
+    setProgress(2, 'Cargando FFmpeg.wasm...');
 
-    if (!window.FFmpeg) throw new Error('FFmpeg no pudo cargarse. Verifica tu conexión a internet.');
+    const ffmpeg = await getFFmpeg(id);
 
-    const { createFFmpeg, fetchFile } = FFmpeg;
+    addLog('Motor FFmpeg v0.12 listo ✓', 'green');
+    setProgress(12, 'Leyendo archivo...');
 
-    addLog('Cargando FFmpeg.wasm (puede tomar ~20 segundos la primera vez)...', 'cyan');
-    setProgress(3, 'Descargando FFmpeg.wasm...');
+    const inputExt = state[id].file.name.split('.').pop().toLowerCase() || 'mp4';
+    const inputName = 'input.' + inputExt;
 
-    const ffmpeg = createFFmpeg({
-      log: false,
-      progress: ({ ratio }) => {
-        if (ratio >= 0) {
-          const pct = 15 + (ratio * 78);
-          setProgress(Math.min(pct, 93), `Procesando video... ${Math.round(ratio * 100)}%`);
-        }
-      }
-    });
+    addLog(`Archivo: ${state[id].file.name} (${formatSize(state[id].file.size)})`, 'cyan');
+    await ffmpeg.writeFile(inputName, await fetchFile(state[id].file));
+    addLog('Archivo cargado ✓', 'green');
+    setProgress(15, 'Iniciando codificación...');
 
-    await ffmpeg.load();
-    addLog('Motor FFmpeg listo ✓', 'green');
-    setProgress(10, 'Motor listo, leyendo archivo...');
+    const { cmdArgs, outputName } = buildFFmpegArgs(id, inputName);
+    addLog('Codificando...', 'orange');
 
-    const safeName = 'input.' + (state[id].file.name.split('.').pop() || 'mp4');
-    addLog(`Cargando: ${state[id].file.name} (${formatSize(state[id].file.size)})`, 'cyan');
-
-    ffmpeg.FS('writeFile', safeName, await fetchFile(state[id].file));
-    addLog('Archivo leído ✓', 'green');
-    setProgress(15, 'Construyendo comando...');
-
-    const args = buildFFmpegArgs(id, safeName);
-    addLog('Iniciando codificación...', 'orange');
-    addLog(`Salida: ${args.outputName}`, '');
-
-    await ffmpeg.run(...args.args);
+    await ffmpeg.exec(cmdArgs);
 
     addLog('Codificación completada ✓', 'green');
-    setProgress(95, 'Creando archivo de descarga...');
+    setProgress(96, 'Generando descarga...');
 
-    const data = ffmpeg.FS('readFile', args.outputName);
-    const ext = args.outputName.split('.').pop();
+    const data = await ffmpeg.readFile(outputName);
+    const ext = outputName.split('.').pop();
     const mimeMap = { mp4:'video/mp4', webm:'video/webm', mkv:'video/x-matroska', avi:'video/x-msvideo', mov:'video/quicktime' };
     const blob = new Blob([data.buffer], { type: mimeMap[ext] || 'video/mp4' });
-    const url = URL.createObjectURL(blob);
+    const url  = URL.createObjectURL(blob);
 
-    const origSize = state[id].file.size;
+    const origSize  = state[id].file.size;
     const finalSize = blob.size;
 
-    document.getElementById('orig-size-' + id).textContent = formatSize(origSize);
+    document.getElementById('orig-size-'  + id).textContent = formatSize(origSize);
     document.getElementById('final-size-' + id).textContent = formatSize(finalSize);
 
     if (isCompressor) {
       const reduction = ((1 - finalSize / origSize) * 100);
-      document.getElementById('reduction-p').textContent = (reduction > 0 ? '-' : '+') + Math.abs(reduction).toFixed(1) + '%';
+      document.getElementById('reduction-p').textContent =
+        (reduction > 0 ? '-' : '+') + Math.abs(reduction).toFixed(1) + '%';
     }
 
-    const downloadEl = document.getElementById('download-' + id);
-    downloadEl.href = url;
-    const prefix = isCompressor ? 'michi_compressed_' : 'michi_converted_';
-    const baseName = state[id].file.name.replace(/\.[^.]+$/, '');
+    const downloadEl   = document.getElementById('download-' + id);
+    downloadEl.href    = url;
+    const prefix       = isCompressor ? 'michi_compressed_' : 'michi_converted_';
+    const baseName     = state[id].file.name.replace(/\.[^.]+$/, '');
     downloadEl.download = prefix + baseName + '.' + ext;
 
     setProgress(100, '¡Completado! 🐱');
-    addLog(`Resultado: ${formatSize(finalSize)} ✓ ¡Listo para descargar!`, 'green');
+    addLog(`Resultado: ${formatSize(finalSize)} — ¡Listo para descargar!`, 'green');
     resultEl.classList.add('visible');
 
-    try { ffmpeg.FS('unlink', safeName); } catch(e) {}
-    try { ffmpeg.FS('unlink', args.outputName); } catch(e) {}
+    // Cleanup virtual FS
+    try { await ffmpeg.deleteFile(inputName); } catch(_) {}
+    try { await ffmpeg.deleteFile(outputName); } catch(_) {}
 
-  } catch(err) {
+  } catch (err) {
     addLog('ERROR: ' + err.message, 'pink');
-    addLog('Nota: FFmpeg.wasm requiere COOP/COEP headers. Puede que tu navegador no lo soporte o necesites usar la app desde un servidor local.', 'orange');
-    setProgress(0, 'Error');
-    console.error(err);
+    addLog('Comprueba la consola del navegador (F12) para más detalles.', 'orange');
+    setProgress(0, 'Error al procesar');
+    console.error('[Video Michi App]', err);
   } finally {
     btn.disabled = false;
   }
 }
+window.processVideo = processVideo;
 
-// Override the onclick handlers
-document.getElementById('btn-convert').onclick = () => window.processVideo('c');
-document.getElementById('btn-compress').onclick = () => window.processVideo('p');
+function buildFFmpegArgs(id, inputName) {
+  const isCompressor = id === 'p';
+  const resSelect    = document.getElementById('resolution-' + id).value;
+  const fpsSelect    = document.getElementById('fps-' + id).value;
+  const crf          = document.getElementById('crf-' + id).value;
+  const formatSelect = document.getElementById(isCompressor ? 'format-p' : 'format-c').value;
 
-// Init
+  let ext    = 'mp4';
+  let vcodec = 'libx264';
+  let acodec = 'aac';
+
+  if      (formatSelect === 'same' || formatSelect === 'mp4') { ext = 'mp4';  vcodec = 'libx264'; }
+  else if (formatSelect === 'mp4_h265') { ext = 'mp4';  vcodec = 'libx265'; }
+  else if (formatSelect === 'webm')     { ext = 'webm'; vcodec = 'libvpx-vp9'; acodec = 'libvorbis'; }
+  else if (formatSelect === 'mkv')      { ext = 'mkv';  vcodec = 'libx264'; }
+  else if (formatSelect === 'avi')      { ext = 'avi';  vcodec = 'libx264'; acodec = 'libmp3lame'; }
+  else if (formatSelect === 'mov')      { ext = 'mov';  vcodec = 'libx264'; }
+
+  if (!isCompressor) {
+    const audioSel = document.getElementById('audio-c').value;
+    if      (audioSel === 'mp3')  acodec = 'libmp3lame';
+    else if (audioSel === 'copy') acodec = 'copy';
+    else if (audioSel === 'none') acodec = null;
+  }
+
+  const outputName = 'output.' + ext;
+  const args = ['-i', inputName, '-c:v', vcodec, '-crf', String(crf)];
+
+  if (vcodec === 'libx264' || vcodec === 'libx265') {
+    args.push('-preset', isCompressor ? 'slow' : 'medium');
+  }
+
+  if (resSelect !== 'same') {
+    const resMap = { '4k':'3840:2160', '1440p':'2560:1440', '1080p':'1920:1080', '720p':'1280:720', '480p':'854:480' };
+    args.push('-vf', `scale=${resMap[resSelect]}:flags=lanczos`);
+  }
+
+  if (fpsSelect !== 'same') args.push('-r', fpsSelect);
+
+  if (acodec === null) {
+    args.push('-an');
+  } else {
+    args.push('-c:a', acodec);
+    if (acodec === 'aac' || acodec === 'libmp3lame') args.push('-b:a', '192k');
+  }
+
+  if (ext === 'mp4' || ext === 'mov') args.push('-movflags', '+faststart');
+  args.push(outputName);
+
+  return { cmdArgs: args, outputName };
+}
+
+function formatSize(bytes) {
+  if (bytes < 1024)             return bytes + ' B';
+  if (bytes < 1024 * 1024)     return (bytes / 1024).toFixed(1) + ' KB';
+  if (bytes < 1024 ** 3)       return (bytes / 1024 / 1024).toFixed(2) + ' MB';
+  return (bytes / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+}
+
+// ========================
+// BUTTON WIRING & INIT
+// ========================
+document.getElementById('btn-convert').onclick  = () => processVideo('c');
+document.getElementById('btn-compress').onclick = () => processVideo('p');
+
 updateCRF('c');
 updateCRF('p');
 updateSpecs();
